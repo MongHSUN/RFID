@@ -14,7 +14,6 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //
-#include "wavetable.hpp"
 #include <uhd/types/tune_request.hpp>
 #include <uhd/utils/thread_priority.hpp>
 #include <uhd/utils/safe_main.hpp>
@@ -28,9 +27,15 @@
 #include <boost/lexical_cast.hpp>
 #include <boost/algorithm/string.hpp>
 #include <boost/filesystem.hpp>
+#include <rfid/api.h>
+#include <rfid/reader.h>
 #include <iostream>
 #include <fstream>
 #include <csignal>
+#include <complex>
+#include <stdio.h>
+#include <vector>
+#include <cmath>
 
 namespace po = boost::program_options;
 using namespace std;
@@ -109,6 +114,7 @@ enum GEN2_LOGIC_STATUS  {SEND_QUERY, SEND_ACK, SEND_QUERY_REP, IDLE, SEND_CW, ST
 enum SIGNAL_STATE {NEG_EDGE, POS_EDGE};
 enum GATE_STATUS {GATE_OPEN, GATE_CLOSED};
 vector<complex<float> > beforeGate, afterGate;
+int flag = 0;
 /***********************************************************************
  * Utilities
  **********************************************************************/
@@ -274,7 +280,7 @@ void readerInit(void){
 
 void transmit_worker(
     uhd::tx_streamer::sptr tx_streamer,
-    uhd::tx_metadata_t metadata,
+    uhd::tx_metadata_t metadata
 ){
     vector<complex<float> > buff(8000);
     readerInit();
@@ -282,21 +288,24 @@ void transmit_worker(
     int size;
     metadata.start_of_burst = false;
     metadata.has_time_spec = false;  
+    metadata.end_of_burst = false;
     //send data until the signal handler gets called
     while(not stop_signal_called){
+        if(flag==0)
+            continue;
         buff.clear();
         uhd::async_metadata_t async_md;
         switch (gen2_logic_status){
             case START:
                 for(int i = 0; i < cw_ack.size(); i++)
                     buff.push_back(cw_ack[i]);
-                size = tx_streamer->send(buffs, buff.size(), metadata);
+                size = tx_streamer->send(buff, buff.size(), metadata);
                 fprintf(stderr, "send size = %d\n",size);
                 if (not tx_streamer->recv_async_msg(async_md)){
                     std::cout << boost::format("failed:\n    Async message recv timed out.\n") << std::endl;
                     continue;
                 }
-            case SEND_QUERY:       
+            case SEND_QUERY:      
                 for(int i = 0; i < cw_ack.size(); i++)
                     buff.push_back(cw_ack[i]);
                 for(int i = 0; i < preamble.size(); i++)
@@ -312,7 +321,7 @@ void transmit_worker(
                 for(int i = 0; i < cw_query.size(); i++)
                     buff.push_back(cw_query[i]);
                 size = tx_streamer->send(&buff.front(), buff.size(), metadata);
-                fprintf(stderr, "send size = %d\n",size);
+                fprintf(stderr, "sendSize = %d\n",size);
                 if (not tx_streamer->recv_async_msg(async_md)){
                     std::cout << boost::format("failed:\n    Async message recv timed out.\n") << std::endl;
                     continue;
@@ -322,6 +331,7 @@ void transmit_worker(
 
             default:
                 //IDLE
+                //fprintf(stderr, "1");
                 break;
         }
                   
@@ -468,7 +478,7 @@ template<typename samp_type> void recv_to_file(
     const std::string &file,
     size_t samps_per_buff,
     int num_requested_samples,
-    float settling_time,
+    float settling_time
 ){
     int num_total_samps = 0;
     //create a receive streamer
@@ -478,13 +488,10 @@ template<typename samp_type> void recv_to_file(
     // Prepare buffers for received samples and metadata
     uhd::rx_metadata_t md;
     vector<samp_type> buff(samps_per_buff);
-
     // Create one ofstream object per channel
     // (use shared_ptr because ofstream is non-copyable)
     std::ofstream outfile;
-    if (not null)
-        outfile.open(file.c_str(), std::ofstream::binary);
-
+    outfile.open(file.c_str(), std::ofstream::binary);
     bool overflow_message = true;
     float timeout = settling_time + 0.1f; //expected settling time + padding for first recv
 
@@ -494,13 +501,14 @@ template<typename samp_type> void recv_to_file(
         uhd::stream_cmd_t::STREAM_MODE_NUM_SAMPS_AND_DONE
     );
     stream_cmd.num_samps = num_requested_samples;
-    stream_cmd.stream_now = false;
+    stream_cmd.stream_now = true;
     stream_cmd.time_spec = uhd::time_spec_t(settling_time);
     rx_stream->issue_stream_cmd(stream_cmd);
 
     while(not stop_signal_called and (num_requested_samples > num_total_samps or num_requested_samples == 0)){
         size_t num_rx_samps = rx_stream->recv(&buff.front(), buff.size(), md, timeout);
         fprintf(stderr, "%d\n", (int)num_rx_samps);
+        flag = 1;
         timeout = 0.1f; //small timeout for subsequent recv
 
         if (md.error_code == uhd::rx_metadata_t::ERROR_CODE_TIMEOUT) {
@@ -521,9 +529,13 @@ template<typename samp_type> void recv_to_file(
             continue;
         }
         if (md.error_code != uhd::rx_metadata_t::ERROR_CODE_NONE){
-            throw std::runtime_error(str(boost::format(
-                "Receiver error %s"
-            ) % md.strerror()));
+            std::string error = str(boost::format("Receiver error: %s") % md.strerror());
+            if (true){
+                std::cerr << error << std::endl;
+                continue;
+            }
+            else
+                throw std::runtime_error(error);
         }
 
         num_total_samps += num_rx_samps;
@@ -544,7 +556,6 @@ template<typename samp_type> void recv_to_file(
     return;
 }
 
-
 /***********************************************************************
  * Main function
  **********************************************************************/
@@ -559,7 +570,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
     //receive variables to be set by po
     std::string rx_args, file, type, rx_ant, rx_subdev, rx_channels;
     size_t total_num_samps, spb;
-    double rx_rate, rx_freq, rx_gain, rx_bw;
+    double rx_rate, rx_freq, rx_gain, rx_bw, lo_off;
     float settling;
 
     //setup the program options
@@ -587,6 +598,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
         ("rx-bw", po::value<double>(&rx_bw), "analog receive filter bandwidth in Hz")
         ("ref", po::value<std::string>(&ref)->default_value("internal"), "clock reference (internal, external, mimo)")
         ("otw", po::value<std::string>(&otw)->default_value("sc16"), "specify the over-the-wire sample mode")
+        ("lo_off", po::value<double>(&lo_off), "Offset for frontend LO in Hz (optional)")
         //("tx-channels", po::value<std::string>(&tx_channels)->default_value("0"), "which TX channel(s) to use (specify \"0\", \"1\", \"0,1\", etc)")
         //("rx-channels", po::value<std::string>(&rx_channels)->default_value("0"), "which RX channel(s) to use (specify \"0\", \"1\", \"0,1\", etc)")
         ("tx-int-n", "tune USRP TX with integer-N tuning")
@@ -667,8 +679,9 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
         return ~0;
     }
 
-    std::cout << boost::format("Setting TX Freq: %f MHz...") % (tx_freq/1e6) << std::endl;
-    uhd::tune_request_t tx_tune_request(tx_freq);
+    uhd::tune_request_t tx_tune_request;
+    if(vm.count("lo_off")) tx_tune_request = uhd::tune_request_t(tx_freq, lo_off);
+    else tx_tune_request = uhd::tune_request_t(tx_freq);
     if(vm.count("tx-int-n")) tx_tune_request.args = uhd::device_addr_t("mode_n=integer");
     tx_usrp->set_tx_freq(tx_tune_request);
     std::cout << boost::format("Actual TX Freq: %f MHz...") % (tx_usrp->get_tx_freq()/1e6) << std::endl << std::endl;
@@ -727,7 +740,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
 
     //setup the metadata flags
     uhd::tx_metadata_t md;
-    md.start_of_burst = true;
+    md.start_of_burst = false;
     md.end_of_burst   = false;
     md.has_time_spec  = true;
     md.time_spec = uhd::time_spec_t(0.1); //give us 0.1 seconds to fill the tx 
