@@ -113,8 +113,8 @@ int s_rate = adc_rate;
 enum GEN2_LOGIC_STATUS  {SEND_QUERY, SEND_ACK, SEND_QUERY_REP, IDLE, SEND_CW, START};
 enum SIGNAL_STATE {NEG_EDGE, POS_EDGE};
 enum GATE_STATUS {GATE_OPEN, GATE_CLOSED};
-vector<complex<float> > beforeGate, afterGate;
-int flag = 0;
+vector<complex<float> > beforeGate, afterGate, buff(8000);
+int flag=0;
 /***********************************************************************
  * Utilities
  **********************************************************************/
@@ -291,9 +291,9 @@ void transmit_worker(
     metadata.end_of_burst = false;
     //send data until the signal handler gets called
     while(not stop_signal_called){
+        buff.clear();
         if(flag==0)
             continue;
-        buff.clear();
         uhd::async_metadata_t async_md;
         switch (gen2_logic_status){
             case START:
@@ -331,7 +331,6 @@ void transmit_worker(
 
             default:
                 //IDLE
-                //fprintf(stderr, "1");
                 break;
         }
                   
@@ -345,6 +344,27 @@ void transmit_worker(
 /***********************************************************************
  * recv_to_file function
  **********************************************************************/
+void filter(void){
+    int now = 0, top, down, size = buff.size()/decim;
+    beforeGate.clear();
+    for(int i=0;i<size;i++){
+        complex<float> tmp(0,0);
+        if(now<25){
+            top = 24;
+            down = -1;
+        }
+        else{
+            top = now;
+            down = now-25;
+        } 
+        for(int j=top;j>down;j--)
+            tmp += buff[j];
+        beforeGate.push_back(tmp);
+        now += decim;
+    }
+    return;
+}
+
 float gate_impl(void){
     vector<float> win_samples;
     int n_items = beforeGate.size();   
@@ -487,11 +507,15 @@ template<typename samp_type> void recv_to_file(
 
     // Prepare buffers for received samples and metadata
     uhd::rx_metadata_t md;
-    vector<samp_type> buff(samps_per_buff);
+    
     // Create one ofstream object per channel
     // (use shared_ptr because ofstream is non-copyable)
-    std::ofstream outfile;
+    ofstream outfile;
     outfile.open(file.c_str(), std::ofstream::binary);
+    ofstream outfile2;
+    outfile2.open("filter_samples.bin", std::ofstream::binary);
+    ofstream outfile3;
+    outfile3.open("gate_samples.bin", std::ofstream::binary);
     bool overflow_message = true;
     float timeout = settling_time + 0.1f; //expected settling time + padding for first recv
 
@@ -504,11 +528,11 @@ template<typename samp_type> void recv_to_file(
     stream_cmd.stream_now = true;
     stream_cmd.time_spec = uhd::time_spec_t(settling_time);
     rx_stream->issue_stream_cmd(stream_cmd);
-
+    s_rate = s_rate/decim;
     while(not stop_signal_called and (num_requested_samples > num_total_samps or num_requested_samples == 0)){
         size_t num_rx_samps = rx_stream->recv(&buff.front(), buff.size(), md, timeout);
+        flag=1;
         fprintf(stderr, "%d\n", (int)num_rx_samps);
-        flag = 1;
         timeout = 0.1f; //small timeout for subsequent recv
 
         if (md.error_code == uhd::rx_metadata_t::ERROR_CODE_TIMEOUT) {
@@ -538,12 +562,40 @@ template<typename samp_type> void recv_to_file(
                 throw std::runtime_error(error);
         }
 
-        num_total_samps += num_rx_samps;
-
+        num_total_samps += num_rx_samps; 
+        // fir_filter_ccc
+        // input : buff, output : beforeGate
+        filter();
         if (outfile.is_open())
-            outfile.write((const char*)&buff.front(), num_rx_samps*sizeof(samp_type));
-        //detect RN16
-        
+            outfile.write((const char*)&buff.front(), num_rx_samps*sizeof(samp_type));  
+        if (outfile2.is_open())
+            outfile2.write((const char*)&beforeGate.front(), beforeGate.size()*sizeof(samp_type)); 
+        //gate
+        float cwAmpl = gate_impl();
+        if(afterGate.size()==0){
+            fprintf(stderr, "no sample passes gate\n");
+            continue;    
+        }
+        if (outfile3.is_open())
+            outfile3.write((const char*)&afterGate.front(), afterGate.size()*sizeof(samp_type)); 
+        //rn16
+        int n_samples_TAG_BIT = TAG_BIT_D * (s_rate / pow(10,6));
+        int rn16Index = correlate(n_samples_TAG_BIT,cwAmpl);
+        fprintf(stderr, "%d\n", rn16Index);
+        if(rn16Index>80){
+            fprintf(stderr, "rn16 detection failure\n");
+            stop_signal_called = true;
+            continue;   
+        }
+        vector<int> RN16_bits = rn16Decode(rn16Index);
+        for(int i=0;i<RN16_bits.size();i++){
+            fprintf(stderr, "%d ",RN16_bits[i]);
+            if(i%4==3)
+                fprintf(stderr,"  ");
+            if(i==RN16_bits.size()-1)
+                fprintf(stderr,"\n");
+        }
+        stop_signal_called = true;
     }
 
     // Shut down receiver
@@ -553,6 +605,10 @@ template<typename samp_type> void recv_to_file(
     // Close files
     if(outfile.is_open())
         outfile.close();
+    if(outfile2.is_open())
+        outfile2.close();
+    if(outfile3.is_open())
+        outfile3.close();
     return;
 }
 
@@ -579,7 +635,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
         ("help", "help message")
         ("tx-args", po::value<std::string>(&tx_args)->default_value("addr=192.168.91.11"), "uhd transmit device address args")
         ("rx-args", po::value<std::string>(&rx_args)->default_value("addr=192.168.91.12"), "uhd receive device address args")
-        ("file", po::value<std::string>(&file)->default_value("rx_samples.bin"), "name of the file to write binary samples to")
+        ("file", po::value<std::string>(&file)->default_value("raw_samples.bin"), "name of the file to write binary samples to")
         ("type", po::value<std::string>(&type)->default_value("float"), "sample type in file: double, float, or short")
         ("nsamps", po::value<size_t>(&total_num_samps)->default_value(0), "total number of samples to receive")
         ("settling", po::value<float>(&settling)->default_value(float(0.5)), "settling time (seconds) before receiving")
@@ -785,7 +841,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
     }
 
     if (total_num_samps == 0){
-        std::signal(SIGINT, &sig_int_handler);
+        signal(SIGINT, &sig_int_handler);
         std::cout << "Press Ctrl + C to stop streaming..." << std::endl;
     }
 
