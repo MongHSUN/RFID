@@ -506,7 +506,7 @@ int correlate(int n_samples_TAG_BIT, float ampl[2]){
     else 
         type = 0;//positive preamble
     //correlation
-    int size=afterGate.size(), index;
+    int size=afterGate.size(), index=0;
     float max=-10000000;
     for (int i=0; i<size-60; i++){
         float sum = 0.0 ;
@@ -519,10 +519,9 @@ int correlate(int n_samples_TAG_BIT, float ampl[2]){
             max = tmp;
             index = i;
         }
-        if(index>20)
-            return 0;
+        if(i==20)
+            return index;
     }
-    return index + 60;
 }
 
 void rn16Decode(int rn16Index){
