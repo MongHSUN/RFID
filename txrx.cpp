@@ -642,10 +642,10 @@ void recv_to_file(
         flag=1;
         if(afterGate.size()==0){
             //fprintf(stderr, "no sample passes gate\n");
-            if (outfile.is_open())
-                outfile.write((const char*)&rxBuff.front(), num_rx_samps*sizeof(complex<float>));  
-            if (outfile2.is_open())
-                outfile2.write((const char*)&beforeGate.front(), beforeGate.size()*sizeof(complex<float>));
+            //if (outfile.is_open())
+            outfile.write((const char*)&rxBuff.front(), num_rx_samps*sizeof(complex<float>));  
+            //if (outfile2.is_open())
+            //    outfile2.write((const char*)&beforeGate.front(), beforeGate.size()*sizeof(complex<float>));
             continue;    
         }
 
@@ -656,12 +656,12 @@ void recv_to_file(
             if( rn16Index==0 ){
                 fprintf(stderr, "rn16 detection failure\n");
                 stop_signal_called = true;
-                if (outfile.is_open())
-                    outfile.write((const char*)&rxBuff.front(), num_rx_samps*sizeof(complex<float>));  
-                if (outfile2.is_open())
-                    outfile2.write((const char*)&beforeGate.front(), beforeGate.size()*sizeof(complex<float>)); 
-                if (outfile3.is_open())
-                    outfile3.write((const char*)&afterGate.front(), afterGate.size()*sizeof(complex<float>)); 
+                //if (outfile.is_open())
+                outfile.write((const char*)&rxBuff.front(), num_rx_samps*sizeof(complex<float>));  
+                //if (outfile2.is_open())
+                //    outfile2.write((const char*)&beforeGate.front(), beforeGate.size()*sizeof(complex<float>)); 
+                //if (outfile3.is_open())
+                //    outfile3.write((const char*)&afterGate.front(), afterGate.size()*sizeof(complex<float>)); 
                 continue;   
             }
             rn16Decode(rn16Index);
@@ -669,10 +669,10 @@ void recv_to_file(
         }
         if (outfile.is_open())
             outfile.write((const char*)&rxBuff.front(), num_rx_samps*sizeof(complex<float>));  
-        if (outfile2.is_open())
-            outfile2.write((const char*)&beforeGate.front(), beforeGate.size()*sizeof(complex<float>)); 
-        if (outfile3.is_open())
-            outfile3.write((const char*)&afterGate.front(), afterGate.size()*sizeof(complex<float>)); 
+        //if (outfile2.is_open())
+        //    outfile2.write((const char*)&beforeGate.front(), beforeGate.size()*sizeof(complex<float>)); 
+        //if (outfile3.is_open())
+        //    outfile3.write((const char*)&afterGate.front(), afterGate.size()*sizeof(complex<float>)); 
     }
     // Shut down receiver
     stream_cmd.stream_mode = uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS;
@@ -709,8 +709,8 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
     po::options_description desc("Allowed options");
     desc.add_options()
         ("help", "help message")
-        ("tx-args", po::value<std::string>(&tx_args)->default_value("addr=192.168.91.12"), "uhd transmit device address args")
-        ("rx-args", po::value<std::string>(&rx_args)->default_value("addr=192.168.91.11"), "uhd receive device address args")
+        ("tx-args", po::value<std::string>(&tx_args)->default_value("addr=192.168.91.17"), "uhd transmit device address args")
+        ("rx-args", po::value<std::string>(&rx_args)->default_value("addr=192.168.91.7"), "uhd receive device address args")
         ("file", po::value<std::string>(&file)->default_value("raw_samples.bin"), "name of the file to write binary samples to")
         //("type", po::value<std::string>(&type)->default_value("float"), "sample type in file: double, float, or short")
         ("nsamps", po::value<size_t>(&total_num_samps)->default_value(0), "total number of samples to receive")
@@ -720,8 +720,8 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
         ("rx-rate", po::value<double>(&rx_rate)->default_value(2e6), "rate of receive incoming samples")
         ("tx-freq", po::value<double>(&tx_freq)->default_value(910e6), "transmit RF center frequency in Hz")
         ("rx-freq", po::value<double>(&rx_freq)->default_value(910e6), "receive RF center frequency in Hz")
-        ("tx-gain", po::value<double>(&tx_gain)->default_value(0), "gain for the transmit RF chain")
-        ("rx-gain", po::value<double>(&rx_gain)->default_value(0), "gain for the receive RF chain")
+        ("tx-gain", po::value<double>(&tx_gain)->default_value(5), "gain for the transmit RF chain")
+        ("rx-gain", po::value<double>(&rx_gain)->default_value(5), "gain for the receive RF chain")
         ("tx-ant", po::value<std::string>(&tx_ant)->default_value("TX/RX"), "transmit antenna selection")
         ("rx-ant", po::value<std::string>(&rx_ant)->default_value("RX2"), "receive antenna selection")
         ("tx-subdev", po::value<std::string>(&tx_subdev)->default_value("A:0"), "transmit subdevice specification")
