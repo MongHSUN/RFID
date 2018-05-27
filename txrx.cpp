@@ -10,7 +10,7 @@
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 // GNU General Public License for more details.
-//
+//m
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //
@@ -36,9 +36,12 @@
 #include <stdio.h>
 #include <vector>
 #include <cmath>
+#include <sys/time.h>
+#include <mutex>
 
 namespace po = boost::program_options;
 using namespace std;
+mutex mtx;
 /***********************************************************************
  * Signal handlers
  **********************************************************************/
@@ -108,18 +111,28 @@ std::vector<float> data_0, data_1, cw, cw_ack, cw_query, delim, frame_sync, prea
 const int dac_rate = 1e6;
 const int adc_rate = 2e6;
 const int decim = 5;
+const int rx_size = 200;
 int s_rate = adc_rate;
-enum GEN2_LOGIC_STATUS  {SEND_QUERY, SEND_ACK, SEND_QUERY_REP, IDLE, SEND_CW, START};
+enum GEN2_LOGIC_STATUS  {SEND_QUERY, SEND_ACK, SEND_QUERY_REP, IDLE, SEND_CW, START, START2};
 enum GATE_STATUS        {GATE_OPEN, GATE_CLOSED, GATE_SEEK_RN16, GATE_SEEK_EPC};  
 enum DECODER_STATUS     {DECODER_DECODE_RN16, DECODER_DECODE_EPC};
 //decoder
 enum SIGNAL_STATE {NEG_EDGE, POS_EDGE};
-GEN2_LOGIC_STATUS gen2_logic_status = START;
 GATE_STATUS gate_status = GATE_SEEK_RN16;
 DECODER_STATUS decoder_status = DECODER_DECODE_RN16;
-vector<complex<float> > beforeGate, afterGate, rxBuff;
+GEN2_LOGIC_STATUS gen2_logic_status = START;
+vector<complex<float> > before_gate(rx_size/decim), after_gate, rx_buff(rx_size);
+vector<complex<float> > filter_buff(25);
 vector<int> RN16_bits;
-int flag=0;
+int flag=0; //receive before send
+int flag2 = 0; //fucking ack bug
+//used in gate
+int gate_pre_count = 0;
+int win_length = WIN_SIZE_D * (s_rate / decim / pow(10,6));
+vector<float> win_samples(win_length);
+SIGNAL_STATE signal_state = NEG_EDGE;
+int win_index=0, n_samples=0, n_samples_to_ungate; 
+float num_pulses=0, sample_thresh, sample_ampl=0, avg_ampl=0;
 /***********************************************************************
  * Utilities
  **********************************************************************/
@@ -287,13 +300,11 @@ void transmit_worker(
     uhd::tx_streamer::sptr tx_streamer,
     uhd::tx_metadata_t metadata
 ){
-    //vector<complex<float> > buff(8000);
     readerInit();
     int size;
     metadata.start_of_burst = false;
-    metadata.has_time_spec = false;  
+    metadata.has_time_spec = false;
     metadata.end_of_burst = false;
-    int written = 0;
     //send data until the signal handler gets called
     while(not stop_signal_called){
         if(flag==0)
@@ -340,36 +351,29 @@ void transmit_worker(
             case SEND_ACK:
                 decoder_status = DECODER_DECODE_EPC;
                 gate_status = GATE_SEEK_EPC;
-                //if(RN16_bits.size()==16){
-                //gen_ack_bits();
-                    /*fprintf(stderr, "ack_bits =");
-                    for(int i=0;i<ack_bits.size();i++)
-                        fprintf(stderr, " %f", ack_bits[i]);
-                    fprintf(stderr, "\n");*/
                 //Send FrameSync
-                for(int i = 0; i < frame_sync.size(); i++)
-                    buff.push_back(frame_sync[i]);
+                buff.insert(buff.end(), frame_sync.begin(), frame_sync.end());
                 //ack
-                for(int i = 0; i < data_0.size(); i++)
-                    buff.push_back(data_0[i]);
-                for(int i = 0; i < data_1.size(); i++)
-                    buff.push_back(data_1[i]);
+                buff.insert(buff.end(), data_0.begin(), data_0.end());
+                buff.insert(buff.end(), data_1.begin(), data_1.end());
                 for(int i = 0; i < RN16_bits.size(); i++){
-                    if(RN16_bits[i] == 1)
-                        for(int j = 0; j < data_1.size(); j++)
-                            buff.push_back(data_1[j]);
-                    else
-                        for(int j = 0; j < data_0.size(); j++)
-                            buff.push_back(data_0[j]);
+                    if(RN16_bits[i] == 1){
+                        buff.insert(buff.end(), data_1.begin(), data_1.end());
+                    }
+                    else{
+                        buff.insert(buff.end(), data_0.begin(), data_0.end());
+                    }           
                 }
-                for(int i = 0; i < cw_ack.size(); i++)
-                    buff.push_back(cw_ack[i]);
+                buff.insert(buff.end(), cw_ack.begin(), cw_ack.end());
                 size = tx_streamer->send(&buff.front(), buff.size(), metadata);
+                /*struct timeval s; 
+                gettimeofday(&s,NULL);
+                printf("send = %ld\n",(unsigned long)s.tv_sec*1000000+(unsigned long)s.tv_usec);*/
                 fprintf(stderr, "ack send size = %d\n",size);
                 if (not tx_streamer->recv_async_msg(async_md)){
                     std::cout << boost::format("failed:\n    Async message recv timed out.\n") << std::endl;
                     continue;
-                }
+                } 
                 fprintf(stderr, "ack_bits =");
                 for(int i=0;i<RN16_bits.size();i++){
                     fprintf(stderr, "%d ",RN16_bits[i]);
@@ -378,24 +382,17 @@ void transmit_worker(
                     if(i==RN16_bits.size()-1)
                         fprintf(stderr,"\n");
                 }
-                //}       
+                //}    
                 gen2_logic_status = IDLE;
-                break;
-
-            case SEND_CW:
-                for(int i = 0; i < cw_ack.size(); i++)
-                    buff.push_back(cw_ack[i]);
-                size = tx_streamer->send(&buff.front(), buff.size(), metadata);
-                fprintf(stderr, "CW send size = %d\n",size);
-                if (not tx_streamer->recv_async_msg(async_md)){
-                    std::cout << boost::format("failed:\n    Async message recv timed out.\n") << std::endl;
-                    continue;
-                }
-                gen2_logic_status = IDLE;
+                flag2 = 0;
+                //stop_signal_called = true;
                 break;
 
             default:
                 //IDLEs
+                if(flag2==1){
+                    gen2_logic_status = SEND_ACK;
+                }
                 break;
         }
                   
@@ -410,49 +407,60 @@ void transmit_worker(
  * recv_to_file function
  **********************************************************************/
 void filter(void){
-    int now = 0, top, down, size = rxBuff.size()/decim;
-    beforeGate.clear();
+    int now = 0, size = rx_size/decim;
+    //beforeGate.resize(0);
     for(int i=0;i<size;i++){
         complex<float> tmp(0,0);
         if(now<25){
-            top = 24;
-            down = -1;
+            for(int j=now;j>=0;j--){
+                tmp += rx_buff[j];
+            }
+            for(int j=0;j<24-now;j++){
+                tmp += filter_buff[j];
+            }
         }
         else{
-            top = now;
-            down = now-25;
+            for(int j=now;j>=now-24;j--){
+                tmp += rx_buff[j];
+            }
         } 
-        for(int j=top;j>down;j--)
-            tmp += rxBuff[j];
-        beforeGate.push_back(tmp);
+        before_gate[i] = tmp;
         now += decim;
     }
+    for(int i=0;i<25;i++){
+        filter_buff[i] = rx_buff[rx_size-1-i];
+    }
+    //struct timeval s; 
+    //gettimeofday(&s, NULL);
+    //printf("filter = %ld\n",(unsigned long)s.tv_sec*1000000+(unsigned long)s.tv_usec);
     return;
 }
 
-void gate_impl(int n_samples_to_ungate, float (&ampl)[2]){
-    vector<float> win_samples;
-    int n_items = beforeGate.size();   
+void gate_impl(float (&ampl)[2]){
+    int n_items = rx_size/decim;
     int n_samples_T1 = T1_D * (s_rate / pow(10,6));
     int n_samples_PW = PW_D * (s_rate / pow(10,6));
-    int n_samples_TAG_BIT = TAG_BIT_D * (s_rate / pow(10,6));  
-    int win_length = WIN_SIZE_D * (s_rate/ pow(10,6));
-    win_samples.resize(win_length);
-    GATE_STATUS gate_status1 = GATE_CLOSED;
-    SIGNAL_STATE signal_state = NEG_EDGE;
-
-    int count = 0;
-    int n_samples=0, win_index=0, dc_index=0, tagIndex; 
-    float num_pulses=0, THRESH_FRACTION = 0.75, sample_thresh, sample_ampl=0, avg_ampl=0, cwAmpl=0;
+    int n_samples_TAG_BIT = TAG_BIT_D * (s_rate / pow(10,6));
+    if(gate_status == GATE_SEEK_EPC){
+        gate_status = GATE_CLOSED;
+        n_samples_to_ungate = (EPC_BITS + TAG_PREAMBLE_BITS) * n_samples_TAG_BIT + 2*n_samples_TAG_BIT;
+        n_samples = 0;
+    }
+    else if (gate_status == GATE_SEEK_RN16){
+        gate_status = GATE_CLOSED;
+        n_samples_to_ungate = (RN16_BITS + TAG_PREAMBLE_BITS) * n_samples_TAG_BIT + 2*n_samples_TAG_BIT;
+        n_samples = 0;
+    }
+    //afterGate.resize(0);
     for(int i = 0; i < n_items; i++){
         // Tracking average amplitude
-        sample_ampl = abs(beforeGate[i]);
+        sample_ampl = abs(before_gate[i]);
         avg_ampl = avg_ampl + (sample_ampl - win_samples[win_index])/win_length;
         win_samples[win_index] = sample_ampl; 
         win_index = (win_index + 1) % win_length; 
         //Threshold for detecting negative/positive edges
         sample_thresh = avg_ampl * THRESH_FRACTION;  
-        if( !(gate_status1 == GATE_OPEN) ){
+        if( !(gate_status == GATE_OPEN) ){
             //Tracking DC offset (only during T1)
             n_samples++;
             // Potitive edge -> Negative edge
@@ -470,73 +478,93 @@ void gate_impl(int n_samples_to_ungate, float (&ampl)[2]){
                 n_samples = 0;
             }
             if(n_samples > n_samples_T1 && signal_state == POS_EDGE && num_pulses > NUM_PULSES_COMMAND){
-                tagIndex = i;
-                gate_status1 = GATE_OPEN;
-                afterGate.push_back(beforeGate[i]); 
+                fprintf(stderr, "hit, # ungate = %d\n", n_samples_to_ungate);
+                gate_status = GATE_OPEN;
+                after_gate.push_back(before_gate[i]); 
                 ampl[1] += sample_ampl;
-                count++;
+                gate_pre_count += 1;
                 num_pulses = 0; 
-                n_samples =  1; // Count number of samples passed to the next block
+                n_samples = 1;
+                for(int j=i; j>i-n_samples_TAG_BIT; j--){
+                    if(j<0){
+                        ampl[0] = (ampl[0] / (i+1)) * n_samples_TAG_BIT;
+                        break;
+                    }
+                    else{
+                        ampl[0] += abs(before_gate[j]);
+                    }
+                }
             }
         }
         else{
             n_samples++;
-            afterGate.push_back(beforeGate[i]); 
-            if(count<n_samples_TAG_BIT)
+            after_gate.push_back(before_gate[i]); 
+            if(gate_pre_count<n_samples_TAG_BIT){
                 ampl[1] += sample_ampl;
-            count++; 
+                gate_pre_count++;
+            }
             if (n_samples >= n_samples_to_ungate){
-                for(int i=tagIndex-n_samples_TAG_BIT; i<tagIndex; i++)
-                    ampl[0] += abs(beforeGate[i]);
-                gate_status1 = GATE_CLOSED;    
+                gate_status = GATE_CLOSED;    
+                gate_pre_count = 0;
                 break;
             }
         }
     }
+    /*struct timeval s; 
+    gettimeofday(&s, NULL);
+    printf("gate = %ld\n",(unsigned long)s.tv_sec*1000000+(unsigned long)s.tv_usec);*/
     return;
 }
 
 int correlate(int n_samples_TAG_BIT, float ampl[2]){
-    vector<int> preamble;
     //choose proper preamble
     int type;
-    fprintf(stderr, "preamble = %f cw = %f\n",ampl[1], ampl[0]);
+    fprintf(stderr, "cw = %f preamble = %f\n",ampl[0], ampl[1]);
     if(ampl[0]>ampl[1]) 
         type = 1;//negative preamble
     else 
         type = 0;//positive preamble
     //correlation
-    int size=afterGate.size(), index=0;
+    int size=after_gate.size(), index=0;
     float max=-10000000;
-    for (int i=0; i<size-60; i++){
-        float sum = 0.0 ;
-        for (int j=i;j<i+60;j++)
-            sum += abs(afterGate[j]);
+    float sum = 0.0;
+    for (int i=0;i<60;i++)
+        sum += abs(after_gate[i]);
+    for (int i=0; i<20; i++){
+        if(i!=0){
+            sum = sum - abs(after_gate[i-1]) + abs(after_gate[i+59]);
+        }
         float tmp=0.0, aver=sum/60;
-        for (int j=0;j<60;j++)
-            tmp += float(PREAMBLE[type][j/5])*(abs(afterGate[i+j])-aver);
+        for (int j=0;j<60;j++){
+            tmp += float(PREAMBLE[type][j/5])*(abs(after_gate[i+j])-aver);
+        }
         if(tmp>max){
             max = tmp;
             index = i;
         }
-        if(i==20)
-            return index;
     }
+    ampl[0] = 0;
+    ampl[1] = 0;
+    /*struct timeval s; 
+    gettimeofday(&s, NULL);
+    printf("correlate = %ld\n",(unsigned long)s.tv_sec*1000000+(unsigned long)s.tv_usec);*/
+    return index;
 }
 
 void rn16Decode(int rn16Index){
     vector<int> tmpBits;
     int windowSize=10, now=rn16Index;
-    RN16_bits.clear();
+    RN16_bits.resize(0);
     //detect +1 or 0 in data
-    for (int i=0;i<RN16_BITS*2;i++){
+    for (int i=0;i<RN16_BITS*2-2;i++){
         float sum = 0.0, aver;
-        for (int j=now-windowSize; j<now+windowSize; j++)
-            sum += abs(afterGate[j]);
+        for (int j=now-windowSize; j<now+windowSize; j++){
+            sum += abs(after_gate[j]);
+        }
         aver = sum/(windowSize*2);
         int count = 0;
         for (int j=now; j<now+5; j++)
-            if( abs(afterGate[j])>aver )
+            if( abs(after_gate[j]) > aver )
                 count++;
         if(count>2)
             tmpBits.push_back(1);
@@ -551,7 +579,10 @@ void rn16Decode(int rn16Index){
         else
             RN16_bits.push_back(1);
     }
-    afterGate.clear();
+    /*struct timeval s; 
+    gettimeofday(&s, NULL);
+    printf("decode = %ld\n",(unsigned long)s.tv_sec*1000000+(unsigned long)s.tv_usec);*/
+    after_gate.resize(0);
     return;
 }
 
@@ -564,6 +595,7 @@ void recv_to_file(
     int num_requested_samples,
     float settling_time
 ){
+    struct timeval s;
     //create a receive streamer
     uhd::stream_args_t stream_args(cpu_format,wire_format);
     uhd::rx_streamer::sptr rx_stream = usrp->get_rx_stream(stream_args);
@@ -574,7 +606,7 @@ void recv_to_file(
     // Create one ofstream object per channel
     // (use shared_ptr because ofstream is non-copyable)
     ofstream outfile;
-    outfile.open(file.c_str(), std::ofstream::binary);
+    outfile.open("raw_samples.bin", std::ofstream::binary);
     ofstream outfile2;
     outfile2.open("filter_samples.bin", std::ofstream::binary);
     ofstream outfile3;
@@ -592,15 +624,17 @@ void recv_to_file(
     stream_cmd.time_spec = uhd::time_spec_t(settling_time);
     rx_stream->issue_stream_cmd(stream_cmd);
     s_rate = s_rate/decim;
-    rxBuff.resize(4000);
+    int n_samples_TAG_BIT = TAG_BIT_D * (s_rate / pow(10,6));
+    //rxBuff.resize(2000);
+    //0 for cw, 1 for preamble
+    float ampl[2] = {0};
 
     while(not stop_signal_called and (num_requested_samples == 0)){
-        size_t num_rx_samps = rx_stream->recv(&rxBuff.front(), rxBuff.size(), md, timeout);
-        //fprintf(stderr, "recv size = %d\n",(int)num_rx_samps);
+        size_t num_rx_samps = rx_stream->recv(&rx_buff.front(), rx_buff.size(), md, timeout);
         //fprintf(stderr, "%d\n", (int)num_rx_samps);
-        timeout = 0.1f; //small timeout for subsequent recv
+        //timeout = 0.1f; //small timeout for subsequent recv
 
-        if (md.error_code == uhd::rx_metadata_t::ERROR_CODE_TIMEOUT) {
+        /*if (md.error_code == uhd::rx_metadata_t::ERROR_CODE_TIMEOUT) {
             std::cout << boost::format("Timeout while streaming") << std::endl;
             break;
         }
@@ -625,54 +659,39 @@ void recv_to_file(
             }
             else
                 throw std::runtime_error(error);
-        }
-        // fir_filter_ccc
+        }*/
+        /*gettimeofday(&s,NULL);
+        printf("receive = %ld\n",(unsigned long)s.tv_sec*1000000+(unsigned long)s.tv_usec);*/
+        // fir_filter_ccc      
         filter();
         //gate
-        int n_samples_to_ungate;
-        int n_samples_TAG_BIT = TAG_BIT_D * (s_rate / pow(10,6));
-        if(gate_status==GATE_SEEK_EPC)
-            n_samples_to_ungate = (EPC_BITS + TAG_PREAMBLE_BITS) * n_samples_TAG_BIT + 2*n_samples_TAG_BIT;
-        else if(gate_status==GATE_SEEK_RN16)
-            n_samples_to_ungate = (RN16_BITS + TAG_PREAMBLE_BITS) * n_samples_TAG_BIT + 2*n_samples_TAG_BIT;
-        
-        //0 for cw, 1 for preamble
-        float ampl[2] = {0};
-        gate_impl(n_samples_to_ungate,ampl);
+        gate_impl(ampl);
         flag=1;
-        if(afterGate.size()==0){
-            //fprintf(stderr, "no sample passes gate\n");
-            //if (outfile.is_open())
-            outfile.write((const char*)&rxBuff.front(), num_rx_samps*sizeof(complex<float>));  
-            //if (outfile2.is_open())
-            //    outfile2.write((const char*)&beforeGate.front(), beforeGate.size()*sizeof(complex<float>));
-            continue;    
+        if(n_samples != n_samples_to_ungate){
+            outfile.write((const char*)&rx_buff.front(), num_rx_samps*sizeof(complex<float>));  
+            //outfile2.write((const char*)&before_gate.front(), before_gate.size()*sizeof(complex<float>));
+            //outfile3.write((const char*)&after_gate.front(), after_gate.size()*sizeof(complex<float>));
+            continue;   
         }
-
         //rn16
         if(decoder_status==DECODER_DECODE_RN16){
             int rn16Index = correlate(n_samples_TAG_BIT,ampl);
-            fprintf(stderr, "rn16 index = %d\n", rn16Index);
-            if( rn16Index==0 ){
+            fprintf(stderr, "rn16 index = %d\n", rn16Index+60);
+            if( rn16Index==0 || rn16Index>10 ){
                 fprintf(stderr, "rn16 detection failure\n");
                 stop_signal_called = true;
-                //if (outfile.is_open())
-                outfile.write((const char*)&rxBuff.front(), num_rx_samps*sizeof(complex<float>));  
-                //if (outfile2.is_open())
-                //    outfile2.write((const char*)&beforeGate.front(), beforeGate.size()*sizeof(complex<float>)); 
-                //if (outfile3.is_open())
-                //    outfile3.write((const char*)&afterGate.front(), afterGate.size()*sizeof(complex<float>)); 
+                outfile.write((const char*)&rx_buff.front(), num_rx_samps*sizeof(complex<float>));  
+                //outfile2.write((const char*)&before_gate.front(), before_gate.size()*sizeof(complex<float>)); 
+                //outfile3.write((const char*)&after_gate.front(), after_gate.size()*sizeof(complex<float>)); 
                 continue;   
             }
-            rn16Decode(rn16Index);
-            gen2_logic_status = SEND_ACK;
+            rn16Decode(rn16Index+60);
+            flag2 = 1;
+            //stop_signal_called = true;
         }
-        if (outfile.is_open())
-            outfile.write((const char*)&rxBuff.front(), num_rx_samps*sizeof(complex<float>));  
-        //if (outfile2.is_open())
-        //    outfile2.write((const char*)&beforeGate.front(), beforeGate.size()*sizeof(complex<float>)); 
-        //if (outfile3.is_open())
-        //    outfile3.write((const char*)&afterGate.front(), afterGate.size()*sizeof(complex<float>)); 
+        outfile.write((const char*)&rx_buff.front(), num_rx_samps*sizeof(complex<float>));  
+        //outfile2.write((const char*)&before_gate.front(), before_gate.size()*sizeof(complex<float>)); 
+        outfile3.write((const char*)&after_gate.front(), after_gate.size()*sizeof(complex<float>)); 
     }
     // Shut down receiver
     stream_cmd.stream_mode = uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS;
@@ -709,8 +728,8 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
     po::options_description desc("Allowed options");
     desc.add_options()
         ("help", "help message")
-        ("tx-args", po::value<std::string>(&tx_args)->default_value("addr=192.168.91.17"), "uhd transmit device address args")
-        ("rx-args", po::value<std::string>(&rx_args)->default_value("addr=192.168.91.7"), "uhd receive device address args")
+        ("tx-args", po::value<std::string>(&tx_args)->default_value("addr=192.168.91.12"), "uhd transmit device address args")
+        ("rx-args", po::value<std::string>(&rx_args)->default_value("addr=192.168.91.11"), "uhd receive device address args")
         ("file", po::value<std::string>(&file)->default_value("raw_samples.bin"), "name of the file to write binary samples to")
         //("type", po::value<std::string>(&type)->default_value("float"), "sample type in file: double, float, or short")
         ("nsamps", po::value<size_t>(&total_num_samps)->default_value(0), "total number of samples to receive")
@@ -720,8 +739,8 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
         ("rx-rate", po::value<double>(&rx_rate)->default_value(2e6), "rate of receive incoming samples")
         ("tx-freq", po::value<double>(&tx_freq)->default_value(910e6), "transmit RF center frequency in Hz")
         ("rx-freq", po::value<double>(&rx_freq)->default_value(910e6), "receive RF center frequency in Hz")
-        ("tx-gain", po::value<double>(&tx_gain)->default_value(5), "gain for the transmit RF chain")
-        ("rx-gain", po::value<double>(&rx_gain)->default_value(5), "gain for the receive RF chain")
+        ("tx-gain", po::value<double>(&tx_gain)->default_value(0), "gain for the transmit RF chain")
+        ("rx-gain", po::value<double>(&rx_gain)->default_value(0), "gain for the receive RF chain")
         ("tx-ant", po::value<std::string>(&tx_ant)->default_value("TX/RX"), "transmit antenna selection")
         ("rx-ant", po::value<std::string>(&rx_ant)->default_value("RX2"), "receive antenna selection")
         ("tx-subdev", po::value<std::string>(&tx_subdev)->default_value("A:0"), "transmit subdevice specification")
