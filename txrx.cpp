@@ -38,10 +38,10 @@
 #include <cmath>
 #include <sys/time.h>
 #include <mutex>
+#include <string>
 
 namespace po = boost::program_options;
 using namespace std;
-mutex mtx;
 /***********************************************************************
  * Signal handlers
  **********************************************************************/
@@ -124,6 +124,7 @@ GEN2_LOGIC_STATUS gen2_logic_status = START;
 vector<complex<float> > before_gate(rx_size/decim), after_gate, rx_buff(rx_size);
 vector<complex<float> > filter_buff(25);
 vector<int> RN16_bits;
+vector<int> EPC_bits;
 int flag=0; //receive before send
 int flag2 = 0; //fucking ack bug
 //used in gate
@@ -133,6 +134,7 @@ vector<float> win_samples(win_length);
 SIGNAL_STATE signal_state = NEG_EDGE;
 int win_index=0, n_samples=0, n_samples_to_ungate; 
 float num_pulses=0, sample_thresh, sample_ampl=0, avg_ampl=0;
+map<string, string> mapping;
 /***********************************************************************
  * Utilities
  **********************************************************************/
@@ -205,7 +207,6 @@ void crc_append(std::vector<float> & q){
 
 void gen_query_bits(void){
     int num_ones = 0, num_zeros = 0;
-    //std::cout << "In gen " << "query_bits_size: " << query_bits.size() << std::endl;
     query_bits.resize(0);
     query_bits.insert(query_bits.end(), &QUERY_CODE[0], &QUERY_CODE[4]);
     query_bits.push_back(DR);
@@ -232,6 +233,25 @@ void gen_query_adjust_bits(void){
     query_adjust_bits.insert(query_adjust_bits.end(), &SESSION[0], &SESSION[2]);
     query_adjust_bits.insert(query_adjust_bits.end(), &Q_UPDN[1][0], &Q_UPDN[1][3]);
     return;
+}
+
+void initMap(void){
+    mapping["0000"] = "0";
+    mapping["0001"] = "1";
+    mapping["0010"] = "2";
+    mapping["0011"] = "3";
+    mapping["0100"] = "4";
+    mapping["0101"] = "5";
+    mapping["0110"] = "6";
+    mapping["0111"] = "7";
+    mapping["1000"] = "8";
+    mapping["1001"] = "9";
+    mapping["1010"] = "A";
+    mapping["1011"] = "B";
+    mapping["1100"] = "C";
+    mapping["1101"] = "D";
+    mapping["1110"] = "E";
+    mapping["1111"] = "F";
 }
 
 void readerInit(void){
@@ -293,6 +313,7 @@ void readerInit(void){
     nak.insert( nak.end(), data_0.begin(), data_0.end() );
     gen_query_bits();
     gen_query_adjust_bits();
+    initMap();
     return;
 }
 
@@ -366,26 +387,22 @@ void transmit_worker(
                 }
                 buff.insert(buff.end(), cw_ack.begin(), cw_ack.end());
                 size = tx_streamer->send(&buff.front(), buff.size(), metadata);
-                /*struct timeval s; 
-                gettimeofday(&s,NULL);
-                printf("send = %ld\n",(unsigned long)s.tv_sec*1000000+(unsigned long)s.tv_usec);*/
                 fprintf(stderr, "ack send size = %d\n",size);
                 if (not tx_streamer->recv_async_msg(async_md)){
                     std::cout << boost::format("failed:\n    Async message recv timed out.\n") << std::endl;
                     continue;
                 } 
-                fprintf(stderr, "ack_bits =");
+                /*fprintf(stderr, "ack_bits =");
                 for(int i=0;i<RN16_bits.size();i++){
                     fprintf(stderr, "%d ",RN16_bits[i]);
                     if(i%4==3)
                         fprintf(stderr,"  ");
                     if(i==RN16_bits.size()-1)
                         fprintf(stderr,"\n");
-                }
+                }*/
                 //}    
                 gen2_logic_status = IDLE;
                 flag2 = 0;
-                //stop_signal_called = true;
                 break;
 
             default:
@@ -430,9 +447,6 @@ void filter(void){
     for(int i=0;i<25;i++){
         filter_buff[i] = rx_buff[rx_size-1-i];
     }
-    //struct timeval s; 
-    //gettimeofday(&s, NULL);
-    //printf("filter = %ld\n",(unsigned long)s.tv_sec*1000000+(unsigned long)s.tv_usec);
     return;
 }
 
@@ -478,7 +492,6 @@ void gate_impl(float (&ampl)[2]){
                 n_samples = 0;
             }
             if(n_samples > n_samples_T1 && signal_state == POS_EDGE && num_pulses > NUM_PULSES_COMMAND){
-                fprintf(stderr, "hit, # ungate = %d\n", n_samples_to_ungate);
                 gate_status = GATE_OPEN;
                 after_gate.push_back(before_gate[i]); 
                 ampl[1] += sample_ampl;
@@ -510,9 +523,6 @@ void gate_impl(float (&ampl)[2]){
             }
         }
     }
-    /*struct timeval s; 
-    gettimeofday(&s, NULL);
-    printf("gate = %ld\n",(unsigned long)s.tv_sec*1000000+(unsigned long)s.tv_usec);*/
     return;
 }
 
@@ -545,9 +555,6 @@ int correlate(int n_samples_TAG_BIT, float ampl[2]){
     }
     ampl[0] = 0;
     ampl[1] = 0;
-    /*struct timeval s; 
-    gettimeofday(&s, NULL);
-    printf("correlate = %ld\n",(unsigned long)s.tv_sec*1000000+(unsigned long)s.tv_usec);*/
     return index;
 }
 
@@ -579,11 +586,84 @@ void rn16Decode(int rn16Index){
         else
             RN16_bits.push_back(1);
     }
-    /*struct timeval s; 
-    gettimeofday(&s, NULL);
-    printf("decode = %ld\n",(unsigned long)s.tv_sec*1000000+(unsigned long)s.tv_usec);*/
     after_gate.resize(0);
     return;
+}
+
+void epcDecode(int epcIndex){
+    vector<int> tmpBits;
+    int windowSize=10, now=epcIndex;
+    EPC_bits.resize(0);
+    //detect +1 or 0 in data
+    for (int i=0;i<EPC_BITS*2-2;i++){
+        float sum = 0.0, aver;
+        for (int j=now-windowSize; j<now+windowSize; j++){
+            sum += abs(after_gate[j]);
+        }
+        aver = sum/(windowSize*2);
+        int count = 0;
+        for (int j=now; j<now+5; j++)
+            if( abs(after_gate[j]) > aver )
+                count++;
+        if(count>2)
+            tmpBits.push_back(1);
+        else
+            tmpBits.push_back(0);
+        now += 5;
+    }
+    //decode by fm0 encoding
+    for (int i=0;i<EPC_BITS*2-2;i+=2){
+        if(tmpBits[i]!=tmpBits[i+1])
+            EPC_bits.push_back(0);
+        else
+            EPC_bits.push_back(1);
+    }
+    after_gate.resize(0);
+    return;
+}
+
+int check_crc(char * bits, int num_bits){
+    register unsigned short i, j;
+    register unsigned short crc_16, rcvd_crc;
+    unsigned char * data;
+    int num_bytes = num_bits / 8;
+    data = (unsigned char* )malloc(num_bytes );
+    int mask;
+
+    for(i = 0; i < num_bytes; i++){
+        mask = 0x80;
+        data[i] = 0;
+        for(j = 0; j < 8; j++){
+            if (bits[(i * 8) + j] == '1'){
+                data[i] = data[i] | mask;
+            }
+            mask = mask >> 1;
+        }
+    }
+    rcvd_crc = (data[num_bytes - 2] << 8) + data[num_bytes -1];
+
+    crc_16 = 0xFFFF; 
+    for (i=0; i < num_bytes - 2; i++){
+        crc_16^=data[i] << 8;
+        for (j=0;j<8;j++){
+            if (crc_16&0x8000){
+                crc_16 <<= 1;
+                crc_16 ^= 0x1021;
+            }
+            else
+                crc_16 <<= 1;
+        }
+    }
+    crc_16 = ~crc_16;
+
+    if(rcvd_crc != crc_16){
+        fprintf(stderr, "crc check fail\n");
+        return -1;
+    }
+    else{
+        fprintf(stderr, "crc check pass\n");
+        return 1;
+    }
 }
 
 void recv_to_file(
@@ -628,40 +708,10 @@ void recv_to_file(
     //rxBuff.resize(2000);
     //0 for cw, 1 for preamble
     float ampl[2] = {0};
+    char char_bits[128];
 
     while(not stop_signal_called and (num_requested_samples == 0)){
         size_t num_rx_samps = rx_stream->recv(&rx_buff.front(), rx_buff.size(), md, timeout);
-        //fprintf(stderr, "%d\n", (int)num_rx_samps);
-        //timeout = 0.1f; //small timeout for subsequent recv
-
-        /*if (md.error_code == uhd::rx_metadata_t::ERROR_CODE_TIMEOUT) {
-            std::cout << boost::format("Timeout while streaming") << std::endl;
-            break;
-        }
-        if (md.error_code == uhd::rx_metadata_t::ERROR_CODE_OVERFLOW){
-            if (overflow_message){
-                overflow_message = false;
-                std::cerr << boost::format(
-                    "Got an overflow indication. Please consider the following:\n"
-                    "  Your write medium must sustain a rate of %fMB/s.\n"
-                    "  Dropped samples will not be written to the file.\n"
-                    "  Please modify this example for your purposes.\n"
-                    "  This message will not appear again.\n"
-                ) % (usrp->get_rx_rate()*sizeof(complex<float>)/1e6);
-            }
-            continue;
-        }
-        if (md.error_code != uhd::rx_metadata_t::ERROR_CODE_NONE){
-            std::string error = str(boost::format("Receiver error: %s") % md.strerror());
-            if (true){
-                std::cerr << error << std::endl;
-                continue;
-            }
-            else
-                throw std::runtime_error(error);
-        }*/
-        /*gettimeofday(&s,NULL);
-        printf("receive = %ld\n",(unsigned long)s.tv_sec*1000000+(unsigned long)s.tv_usec);*/
         // fir_filter_ccc      
         filter();
         //gate
@@ -669,8 +719,6 @@ void recv_to_file(
         flag=1;
         if(n_samples != n_samples_to_ungate){
             outfile.write((const char*)&rx_buff.front(), num_rx_samps*sizeof(complex<float>));  
-            //outfile2.write((const char*)&before_gate.front(), before_gate.size()*sizeof(complex<float>));
-            //outfile3.write((const char*)&after_gate.front(), after_gate.size()*sizeof(complex<float>));
             continue;   
         }
         //rn16
@@ -681,17 +729,49 @@ void recv_to_file(
                 fprintf(stderr, "rn16 detection failure\n");
                 stop_signal_called = true;
                 outfile.write((const char*)&rx_buff.front(), num_rx_samps*sizeof(complex<float>));  
-                //outfile2.write((const char*)&before_gate.front(), before_gate.size()*sizeof(complex<float>)); 
-                //outfile3.write((const char*)&after_gate.front(), after_gate.size()*sizeof(complex<float>)); 
                 continue;   
             }
             rn16Decode(rn16Index+60);
             flag2 = 1;
-            //stop_signal_called = true;
+        } else if (decoder_status==DECODER_DECODE_EPC){
+            int epcIndex = correlate(n_samples_to_ungate,ampl);
+            fprintf(stderr, "epc index = %d\n", epcIndex+60);
+            if( epcIndex==0 || epcIndex>10 ){
+                fprintf(stderr, "epc detection failure\n");
+                stop_signal_called = true;
+                outfile.write((const char*)&rx_buff.front(), num_rx_samps*sizeof(complex<float>));  
+                //outfile2.write((const char*)&before_gate.front(), before_gate.size()*sizeof(complex<float>)); 
+                //outfile3.write((const char*)&after_gate.front(), after_gate.size()*sizeof(complex<float>)); 
+                continue;   
+            }
+            outfile3.write((const char*)&after_gate.front(), after_gate.size()*sizeof(complex<float>));
+            epcDecode(epcIndex+60);
+            fprintf(stderr, "EPC = ");
+            for(int i=0;i<EPC_bits.size();i++){
+                if (EPC_bits[i] == 0)
+                    char_bits[i] = '0';
+                else
+                    char_bits[i] = '1';
+                /*fprintf(stderr, "%d ",EPC_bits[i]);
+                if(i%4==3)
+                    fprintf(stderr,"  ");
+                if(i==EPC_bits.size()-1)
+                    fprintf(stderr,"\n");*/
+            }
+            int result = check_crc(char_bits, EPC_BITS-1);
+            string epcCode = "";
+            for(int i=16;i<112;i+=4){
+                string tmp = "";
+                tmp.append(1, char_bits[i]);
+                tmp.append(1, char_bits[i+1]);
+                tmp.append(1, char_bits[i+2]);
+                tmp.append(1, char_bits[i+3]);
+                epcCode += mapping[tmp];
+            }
+            fprintf(stderr, "epc = %s\n", epcCode.c_str());
+            stop_signal_called = true;
         }
         outfile.write((const char*)&rx_buff.front(), num_rx_samps*sizeof(complex<float>));  
-        //outfile2.write((const char*)&before_gate.front(), before_gate.size()*sizeof(complex<float>)); 
-        outfile3.write((const char*)&after_gate.front(), after_gate.size()*sizeof(complex<float>)); 
     }
     // Shut down receiver
     stream_cmd.stream_mode = uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS;
