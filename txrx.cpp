@@ -37,8 +37,8 @@
 #include <vector>
 #include <cmath>
 #include <sys/time.h>
-#include <mutex>
 #include <string>
+#include <set>
 
 namespace po = boost::program_options;
 using namespace std;
@@ -52,8 +52,7 @@ void sig_int_handler(int){stop_signal_called = true;}
 // Fixed number of slots (2^(FIXED_Q))  
 const int FIXED_Q              = 0;
 // Termination criteria
-// const int MAX_INVENTORY_ROUND = 50;
-const int MAX_NUM_QUERIES     = 1;     // Stop after MAX_NUM_QUERIES have been sent
+const int MAX_NUM_QUERIES     = 1000;     // Stop after MAX_NUM_QUERIES have been sent
 // valid values for Q
 const int Q_VALUE [16][4] =  
 {
@@ -125,8 +124,9 @@ vector<complex<float> > before_gate(rx_size/decim), after_gate, rx_buff(rx_size)
 vector<complex<float> > filter_buff(25);
 vector<int> RN16_bits;
 vector<int> EPC_bits;
-int flag=0; //receive before send
+int flag = 0; //receive before send
 int flag2 = 0; //fucking ack bug
+int flag3 = 0; //fucking query bug
 //used in gate
 int gate_pre_count = 0;
 int win_length = WIN_SIZE_D * (s_rate / decim / pow(10,6));
@@ -135,6 +135,7 @@ SIGNAL_STATE signal_state = NEG_EDGE;
 int win_index=0, n_samples=0, n_samples_to_ungate; 
 float num_pulses=0, sample_thresh, sample_ampl=0, avg_ampl=0;
 map<string, string> mapping;
+int n_queries_sent = 0;
 /***********************************************************************
  * Utilities
  **********************************************************************/
@@ -348,18 +349,14 @@ void transmit_worker(
             case SEND_QUERY:      
                 decoder_status = DECODER_DECODE_RN16;
                 gate_status = GATE_SEEK_RN16;
-                for(int i = 0; i < preamble.size(); i++)
-                    buff.push_back(preamble[i]);
+                buff.insert(buff.end(), preamble.begin(), preamble.end());
                 for(int i = 0; i < query_bits.size(); i++){
                     if(query_bits[i] == 1)
-                        for(int j = 0; j < data_1.size(); j++)
-                            buff.push_back(data_1[j]);
+                        buff.insert(buff.end(), data_1.begin(), data_1.end());
                     else
-                        for(int j = 0; j < data_0.size(); j++)
-                            buff.push_back(data_0[j]);
+                        buff.insert(buff.end(), data_0.begin(), data_0.end());
                 }
-                for(int i = 0; i < cw_query.size(); i++)
-                    buff.push_back(cw_query[i]);
+                buff.insert(buff.end(), cw_query.begin(), cw_query.end());
                 size = tx_streamer->send(&buff.front(), buff.size(), metadata);
                 fprintf(stderr, "query send size = %d\n",size);
                 if (not tx_streamer->recv_async_msg(async_md)){
@@ -367,6 +364,7 @@ void transmit_worker(
                     continue;
                 }
                 gen2_logic_status = IDLE;
+                flag3 = 0;
                 break;
 
             case SEND_ACK:
@@ -391,24 +389,16 @@ void transmit_worker(
                 if (not tx_streamer->recv_async_msg(async_md)){
                     std::cout << boost::format("failed:\n    Async message recv timed out.\n") << std::endl;
                     continue;
-                } 
-                /*fprintf(stderr, "ack_bits =");
-                for(int i=0;i<RN16_bits.size();i++){
-                    fprintf(stderr, "%d ",RN16_bits[i]);
-                    if(i%4==3)
-                        fprintf(stderr,"  ");
-                    if(i==RN16_bits.size()-1)
-                        fprintf(stderr,"\n");
-                }*/
-                //}    
+                }
                 gen2_logic_status = IDLE;
                 flag2 = 0;
                 break;
 
-            default:
-                //IDLEs
-                if(flag2==1){
+            default: 
+                if(flag2 == 1){
                     gen2_logic_status = SEND_ACK;
+                } else if(flag3 == 1){
+                    gen2_logic_status = SEND_QUERY;
                 }
                 break;
         }
@@ -455,6 +445,7 @@ void gate_impl(float (&ampl)[2]){
     int n_samples_T1 = T1_D * (s_rate / pow(10,6));
     int n_samples_PW = PW_D * (s_rate / pow(10,6));
     int n_samples_TAG_BIT = TAG_BIT_D * (s_rate / pow(10,6));
+
     if(gate_status == GATE_SEEK_EPC){
         gate_status = GATE_CLOSED;
         n_samples_to_ungate = (EPC_BITS + TAG_PREAMBLE_BITS) * n_samples_TAG_BIT + 2*n_samples_TAG_BIT;
@@ -465,7 +456,7 @@ void gate_impl(float (&ampl)[2]){
         n_samples_to_ungate = (RN16_BITS + TAG_PREAMBLE_BITS) * n_samples_TAG_BIT + 2*n_samples_TAG_BIT;
         n_samples = 0;
     }
-    //afterGate.resize(0);
+    
     for(int i = 0; i < n_items; i++){
         // Tracking average amplitude
         sample_ampl = abs(before_gate[i]);
@@ -675,7 +666,6 @@ void recv_to_file(
     int num_requested_samples,
     float settling_time
 ){
-    struct timeval s;
     //create a receive streamer
     uhd::stream_args_t stream_args(cpu_format,wire_format);
     uhd::rx_streamer::sptr rx_stream = usrp->get_rx_stream(stream_args);
@@ -705,78 +695,91 @@ void recv_to_file(
     rx_stream->issue_stream_cmd(stream_cmd);
     s_rate = s_rate/decim;
     int n_samples_TAG_BIT = TAG_BIT_D * (s_rate / pow(10,6));
-    //rxBuff.resize(2000);
     //0 for cw, 1 for preamble
     float ampl[2] = {0};
     char char_bits[128];
+    int count[4] = {0}; //0 for rn16 fail, 1 for epc fail, 2 for crc check fail, 3 for success
+    set<string> unique_epc;
 
     while(not stop_signal_called and (num_requested_samples == 0)){
         size_t num_rx_samps = rx_stream->recv(&rx_buff.front(), rx_buff.size(), md, timeout);
-        // fir_filter_ccc      
-        filter();
-        //gate
+        outfile.write((const char*)&rx_buff.front(), num_rx_samps*sizeof(complex<float>));
+        if(n_queries_sent >= MAX_NUM_QUERIES){
+            stop_signal_called = true;
+            continue;
+        }
+        filter(); // fir_filter_ccc
         gate_impl(ampl);
         flag=1;
         if(n_samples != n_samples_to_ungate){
-            outfile.write((const char*)&rx_buff.front(), num_rx_samps*sizeof(complex<float>));  
-            continue;   
+            continue;
         }
-        //rn16
+        //rn16 or epc
         if(decoder_status==DECODER_DECODE_RN16){
             int rn16Index = correlate(n_samples_TAG_BIT,ampl);
             fprintf(stderr, "rn16 index = %d\n", rn16Index+60);
             if( rn16Index==0 || rn16Index>10 ){
+                after_gate.resize(0);
                 fprintf(stderr, "rn16 detection failure\n");
-                stop_signal_called = true;
-                outfile.write((const char*)&rx_buff.front(), num_rx_samps*sizeof(complex<float>));  
-                continue;   
+                flag3 = 1;
+                count[0] += 1;
+                n_queries_sent += 1;  
+                continue;
             }
             rn16Decode(rn16Index+60);
             flag2 = 1;
         } else if (decoder_status==DECODER_DECODE_EPC){
+            n_queries_sent += 1;
+            flag3 = 1;
             int epcIndex = correlate(n_samples_to_ungate,ampl);
             fprintf(stderr, "epc index = %d\n", epcIndex+60);
             if( epcIndex==0 || epcIndex>10 ){
+                after_gate.resize(0);
                 fprintf(stderr, "epc detection failure\n");
-                stop_signal_called = true;
-                outfile.write((const char*)&rx_buff.front(), num_rx_samps*sizeof(complex<float>));  
-                //outfile2.write((const char*)&before_gate.front(), before_gate.size()*sizeof(complex<float>)); 
-                //outfile3.write((const char*)&after_gate.front(), after_gate.size()*sizeof(complex<float>)); 
+                count[1] += 1;  
                 continue;   
             }
-            outfile3.write((const char*)&after_gate.front(), after_gate.size()*sizeof(complex<float>));
             epcDecode(epcIndex+60);
-            fprintf(stderr, "EPC = ");
             for(int i=0;i<EPC_bits.size();i++){
                 if (EPC_bits[i] == 0)
                     char_bits[i] = '0';
                 else
                     char_bits[i] = '1';
-                /*fprintf(stderr, "%d ",EPC_bits[i]);
-                if(i%4==3)
-                    fprintf(stderr,"  ");
-                if(i==EPC_bits.size()-1)
-                    fprintf(stderr,"\n");*/
             }
             int result = check_crc(char_bits, EPC_BITS-1);
-            string epcCode = "";
-            for(int i=16;i<112;i+=4){
-                string tmp = "";
-                tmp.append(1, char_bits[i]);
-                tmp.append(1, char_bits[i+1]);
-                tmp.append(1, char_bits[i+2]);
-                tmp.append(1, char_bits[i+3]);
-                epcCode += mapping[tmp];
+            if(result != 1){
+                count[2] +=1;
+            } else{
+                string epcCode = "";
+                for(int i=16;i<112;i+=4){
+                    string tmp = "";
+                    tmp.append(1, char_bits[i]);
+                    tmp.append(1, char_bits[i+1]);
+                    tmp.append(1, char_bits[i+2]);
+                    tmp.append(1, char_bits[i+3]);
+                    epcCode += mapping[tmp];
+                }
+                unique_epc.insert(epcCode);
+                count[3] += 1;
             }
-            fprintf(stderr, "epc = %s\n", epcCode.c_str());
-            stop_signal_called = true;
         }
-        outfile.write((const char*)&rx_buff.front(), num_rx_samps*sizeof(complex<float>));  
+         
     }
     // Shut down receiver
     stream_cmd.stream_mode = uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS;
     rx_stream->issue_stream_cmd(stream_cmd);
 
+    fprintf(stderr, "total query = %d\n", MAX_NUM_QUERIES);
+    fprintf(stderr, "rn16 decode fail %d\n", count[0]);
+    fprintf(stderr, "epc decode fail %d\n", count[1]);
+    fprintf(stderr, "crc check fail %d\n", count[2]);
+    fprintf(stderr, "get epc success %d\n\nall EPC :\n", count[3]);
+
+    set<string>::iterator it = unique_epc.begin();
+    while(it != unique_epc.end()){
+        fprintf(stderr, "%s\n", (*it).c_str());
+        it++;
+    }
     // Close files
     if(outfile.is_open())
         outfile.close();
