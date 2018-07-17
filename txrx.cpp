@@ -39,20 +39,19 @@
 #include <sys/time.h>
 #include <string>
 #include <set>
+using namespace std;
 
 namespace po = boost::program_options;
-using namespace std;
 /***********************************************************************
  * Signal handlers
  **********************************************************************/
 static bool stop_signal_called = false;
 void sig_int_handler(int){stop_signal_called = true;}
-
 // CONSTANTS (READER CONFIGURATION)
 // Fixed number of slots (2^(FIXED_Q))  
 const int FIXED_Q              = 0;
 // Termination criteria
-const int MAX_NUM_QUERIES     = 1000;     // Stop after MAX_NUM_QUERIES have been sent
+int MAX_NUM_QUERIES     = 1;     // Stop after MAX_NUM_QUERIES have been sent, default 1
 // valid values for Q
 const int Q_VALUE [16][4] =  
 {
@@ -115,27 +114,23 @@ int s_rate = adc_rate;
 enum GEN2_LOGIC_STATUS  {SEND_QUERY, SEND_ACK, SEND_QUERY_REP, IDLE, SEND_CW, START, START2};
 enum GATE_STATUS        {GATE_OPEN, GATE_CLOSED, GATE_SEEK_RN16, GATE_SEEK_EPC};  
 enum DECODER_STATUS     {DECODER_DECODE_RN16, DECODER_DECODE_EPC};
-//decoder
 enum SIGNAL_STATE {NEG_EDGE, POS_EDGE};
 GATE_STATUS gate_status = GATE_SEEK_RN16;
 DECODER_STATUS decoder_status = DECODER_DECODE_RN16;
 GEN2_LOGIC_STATUS gen2_logic_status = START;
-vector<complex<float> > before_gate(rx_size/decim), after_gate, rx_buff(rx_size);
-vector<complex<float> > filter_buff(25);
-vector<int> RN16_bits;
-vector<int> EPC_bits;
+SIGNAL_STATE signal_state = NEG_EDGE;
+vector<complex<float> > before_gate(rx_size/decim), after_gate, rx_buff(rx_size), filter_buff(25);
+vector<int> RN16_bits, EPC_bits;
+map<string, string> mapping;
 int flag = 0; //receive before send
-int flag2 = 0; //fucking ack bug
-int flag3 = 0; //fucking query bug
+int flag2 = 0; //for ack bug
+int flag3 = 0; //for query bug
 //used in gate
 int gate_pre_count = 0;
 int win_length = WIN_SIZE_D * (s_rate / decim / pow(10,6));
 vector<float> win_samples(win_length);
-SIGNAL_STATE signal_state = NEG_EDGE;
 int win_index=0, n_samples=0, n_samples_to_ungate; 
 float num_pulses=0, sample_thresh, sample_ampl=0, avg_ampl=0;
-map<string, string> mapping;
-int n_queries_sent = 0;
 /***********************************************************************
  * Utilities
  **********************************************************************/
@@ -335,10 +330,9 @@ void transmit_worker(
         uhd::async_metadata_t async_md;
         switch (gen2_logic_status){
             case START:
-                for(int i = 0; i < cw_ack.size(); i++)
-                    buff.push_back(cw_ack[i]);
+                buff.insert(buff.end(), cw_ack.begin(), cw_ack.end());
                 size = tx_streamer->send(&buff.front(), buff.size(), metadata);
-                fprintf(stderr, "start send size = %d\n",size);
+                //fprintf(stderr, "start send size = %d\n",size);
                 if (not tx_streamer->recv_async_msg(async_md)){
                     std::cout << boost::format("failed:\n    Async message recv timed out.\n") << std::endl;
                     continue;
@@ -346,19 +340,20 @@ void transmit_worker(
                 gen2_logic_status = SEND_QUERY;
                 break;
 
-            case SEND_QUERY:      
+            case SEND_QUERY:
                 decoder_status = DECODER_DECODE_RN16;
                 gate_status = GATE_SEEK_RN16;
                 buff.insert(buff.end(), preamble.begin(), preamble.end());
                 for(int i = 0; i < query_bits.size(); i++){
-                    if(query_bits[i] == 1)
+                    if(query_bits[i] == 1){
                         buff.insert(buff.end(), data_1.begin(), data_1.end());
-                    else
+                    } else{
                         buff.insert(buff.end(), data_0.begin(), data_0.end());
+                    }
                 }
                 buff.insert(buff.end(), cw_query.begin(), cw_query.end());
                 size = tx_streamer->send(&buff.front(), buff.size(), metadata);
-                fprintf(stderr, "query send size = %d\n",size);
+                //fprintf(stderr, "query send size = %d\n",size);
                 if (not tx_streamer->recv_async_msg(async_md)){
                     std::cout << boost::format("failed:\n    Async message recv timed out.\n") << std::endl;
                     continue;
@@ -378,14 +373,13 @@ void transmit_worker(
                 for(int i = 0; i < RN16_bits.size(); i++){
                     if(RN16_bits[i] == 1){
                         buff.insert(buff.end(), data_1.begin(), data_1.end());
-                    }
-                    else{
+                    } else{
                         buff.insert(buff.end(), data_0.begin(), data_0.end());
                     }           
                 }
                 buff.insert(buff.end(), cw_ack.begin(), cw_ack.end());
                 size = tx_streamer->send(&buff.front(), buff.size(), metadata);
-                fprintf(stderr, "ack send size = %d\n",size);
+                //fprintf(stderr, "ack send size = %d\n",size);
                 if (not tx_streamer->recv_async_msg(async_md)){
                     std::cout << boost::format("failed:\n    Async message recv timed out.\n") << std::endl;
                     continue;
@@ -394,7 +388,7 @@ void transmit_worker(
                 flag2 = 0;
                 break;
 
-            default: 
+            default:
                 if(flag2 == 1){
                     gen2_logic_status = SEND_ACK;
                 } else if(flag3 == 1){
@@ -520,7 +514,7 @@ void gate_impl(float (&ampl)[2]){
 int correlate(int n_samples_TAG_BIT, float ampl[2]){
     //choose proper preamble
     int type;
-    fprintf(stderr, "cw = %f preamble = %f\n",ampl[0], ampl[1]);
+    //fprintf(stderr, "cw : %f, preamble : %f\n",ampl[0], ampl[1]);
     if(ampl[0]>ampl[1]) 
         type = 1;//negative preamble
     else 
@@ -613,7 +607,7 @@ void epcDecode(int epcIndex){
     return;
 }
 
-int check_crc(char * bits, int num_bits){
+int check_crc(char * bits, int num_bits, int n_queries_sent){
     register unsigned short i, j;
     register unsigned short crc_16, rcvd_crc;
     unsigned char * data;
@@ -648,11 +642,10 @@ int check_crc(char * bits, int num_bits){
     crc_16 = ~crc_16;
 
     if(rcvd_crc != crc_16){
-        fprintf(stderr, "crc check fail\n");
+        fprintf(stderr, "Query %d: crc check failure\n", n_queries_sent+1);
         return -1;
-    }
-    else{
-        fprintf(stderr, "crc check pass\n");
+    } else{
+        fprintf(stderr, "Query %d: get epc success\n", n_queries_sent+1);
         return 1;
     }
 }
@@ -675,11 +668,9 @@ void recv_to_file(
     
     // Create one ofstream object per channel
     // (use shared_ptr because ofstream is non-copyable)
-    ofstream outfile;
+    ofstream outfile, outfile2, outfile3;
     outfile.open("raw_samples.bin", std::ofstream::binary);
-    ofstream outfile2;
     outfile2.open("filter_samples.bin", std::ofstream::binary);
-    ofstream outfile3;
     outfile3.open("gate_samples.bin", std::ofstream::binary);
     bool overflow_message = true;
     float timeout = settling_time + 0.1f; //expected settling time + padding for first recv
@@ -700,10 +691,19 @@ void recv_to_file(
     char char_bits[128];
     int count[4] = {0}; //0 for rn16 fail, 1 for epc fail, 2 for crc check fail, 3 for success
     set<string> unique_epc;
+    int query_state[MAX_NUM_QUERIES];
+    int n_queries_sent = 0;
+    int trick = 0;
 
     while(not stop_signal_called and (num_requested_samples == 0)){
         size_t num_rx_samps = rx_stream->recv(&rx_buff.front(), rx_buff.size(), md, timeout);
         outfile.write((const char*)&rx_buff.front(), num_rx_samps*sizeof(complex<float>));
+        trick += 1;
+        if(trick > 70){
+            flag3 = 1;
+            trick = 0;
+            continue;
+        }
         if(n_queries_sent >= MAX_NUM_QUERIES){
             stop_signal_called = true;
             continue;
@@ -714,29 +714,32 @@ void recv_to_file(
         if(n_samples != n_samples_to_ungate){
             continue;
         }
+        trick = 0;
         //rn16 or epc
         if(decoder_status==DECODER_DECODE_RN16){
             int rn16Index = correlate(n_samples_TAG_BIT,ampl);
-            fprintf(stderr, "rn16 index = %d\n", rn16Index+60);
+            //fprintf(stderr, "RN16 index : %d\n", rn16Index+60);
             if( rn16Index==0 || rn16Index>10 ){
-                after_gate.resize(0);
-                fprintf(stderr, "rn16 detection failure\n");
                 flag3 = 1;
+                after_gate.resize(0);
+                fprintf(stderr, "Query %d: no rn16\n", n_queries_sent+1);
                 count[0] += 1;
+                query_state[n_queries_sent] = 0;
                 n_queries_sent += 1;  
                 continue;
             }
             rn16Decode(rn16Index+60);
             flag2 = 1;
         } else if (decoder_status==DECODER_DECODE_EPC){
-            n_queries_sent += 1;
-            flag3 = 1;
             int epcIndex = correlate(n_samples_to_ungate,ampl);
-            fprintf(stderr, "epc index = %d\n", epcIndex+60);
+            flag3 = 1;
+            //fprintf(stderr, "epc index : %d\n", epcIndex+60);
             if( epcIndex==0 || epcIndex>10 ){
                 after_gate.resize(0);
-                fprintf(stderr, "epc detection failure\n");
-                count[1] += 1;  
+                fprintf(stderr, "Query %d: no epc\n", n_queries_sent+1);
+                count[1] += 1;
+                query_state[n_queries_sent] = 1;
+                n_queries_sent += 1;
                 continue;   
             }
             epcDecode(epcIndex+60);
@@ -746,9 +749,10 @@ void recv_to_file(
                 else
                     char_bits[i] = '1';
             }
-            int result = check_crc(char_bits, EPC_BITS-1);
+            int result = check_crc(char_bits, EPC_BITS-1, n_queries_sent);
             if(result != 1){
                 count[2] +=1;
+                query_state[n_queries_sent] = 2;
             } else{
                 string epcCode = "";
                 for(int i=16;i<112;i+=4){
@@ -761,7 +765,9 @@ void recv_to_file(
                 }
                 unique_epc.insert(epcCode);
                 count[3] += 1;
+                query_state[n_queries_sent] = 3;
             }
+            n_queries_sent += 1;
         }
          
     }
@@ -769,17 +775,20 @@ void recv_to_file(
     stream_cmd.stream_mode = uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS;
     rx_stream->issue_stream_cmd(stream_cmd);
 
-    fprintf(stderr, "total query = %d\n", MAX_NUM_QUERIES);
-    fprintf(stderr, "rn16 decode fail %d\n", count[0]);
-    fprintf(stderr, "epc decode fail %d\n", count[1]);
-    fprintf(stderr, "crc check fail %d\n", count[2]);
-    fprintf(stderr, "get epc success %d\n\nall EPC :\n", count[3]);
+    fprintf(stderr, "\n --------------------------\n| Total Query = %d\n", MAX_NUM_QUERIES);
+    fprintf(stderr, "| No RN16 : %d\n", count[0]);
+    fprintf(stderr, "| No EPC : %d\n", count[1]);
+    fprintf(stderr, "| CRC Check Fail : %d\n", count[2]);
+    fprintf(stderr, "| Success : :%d\n|\n| All EPC :\n", count[3]);
 
     set<string>::iterator it = unique_epc.begin();
+    int num_epc = 1;
     while(it != unique_epc.end()){
-        fprintf(stderr, "%s\n", (*it).c_str());
+        fprintf(stderr, "| %d. %s\n", num_epc, (*it).c_str());
         it++;
+        num_epc++;
     }
+    fprintf(stderr, " --------------------------\n");
     // Close files
     if(outfile.is_open())
         outfile.close();
@@ -811,8 +820,8 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
     po::options_description desc("Allowed options");
     desc.add_options()
         ("help", "help message")
-        ("tx-args", po::value<std::string>(&tx_args)->default_value("addr=192.168.91.12"), "uhd transmit device address args")
-        ("rx-args", po::value<std::string>(&rx_args)->default_value("addr=192.168.91.11"), "uhd receive device address args")
+        ("tx-args", po::value<std::string>(&tx_args)->default_value("addr=192.168.91.7"), "uhd transmit device address args")
+        ("rx-args", po::value<std::string>(&rx_args)->default_value("addr=192.168.91.12"), "uhd receive device address args")
         ("file", po::value<std::string>(&file)->default_value("raw_samples.bin"), "name of the file to write binary samples to")
         //("type", po::value<std::string>(&type)->default_value("float"), "sample type in file: double, float, or short")
         ("nsamps", po::value<size_t>(&total_num_samps)->default_value(0), "total number of samples to receive")
@@ -822,8 +831,8 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
         ("rx-rate", po::value<double>(&rx_rate)->default_value(2e6), "rate of receive incoming samples")
         ("tx-freq", po::value<double>(&tx_freq)->default_value(910e6), "transmit RF center frequency in Hz")
         ("rx-freq", po::value<double>(&rx_freq)->default_value(910e6), "receive RF center frequency in Hz")
-        ("tx-gain", po::value<double>(&tx_gain)->default_value(0), "gain for the transmit RF chain")
-        ("rx-gain", po::value<double>(&rx_gain)->default_value(0), "gain for the receive RF chain")
+        ("tx-gain", po::value<double>(&tx_gain)->default_value(5), "gain for the transmit RF chain")
+        ("rx-gain", po::value<double>(&rx_gain)->default_value(5), "gain for the receive RF chain")
         ("tx-ant", po::value<std::string>(&tx_ant)->default_value("TX/RX"), "transmit antenna selection")
         ("rx-ant", po::value<std::string>(&rx_ant)->default_value("RX2"), "receive antenna selection")
         ("tx-subdev", po::value<std::string>(&tx_subdev)->default_value("A:0"), "transmit subdevice specification")
@@ -847,6 +856,10 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
         return ~0;
     }
 
+    if(argc==2){
+        MAX_NUM_QUERIES = atoi(argv[1]);
+    }
+    fprintf(stderr, "#query = %d\n", MAX_NUM_QUERIES);
     //create a usrp device
     std::cout << std::endl;
     std::cout << boost::format("Creating the transmit usrp device with: %s...") % tx_args << std::endl;
