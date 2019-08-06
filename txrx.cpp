@@ -27,6 +27,7 @@
 #include <boost/lexical_cast.hpp>
 #include <boost/algorithm/string.hpp>
 #include <boost/filesystem.hpp>
+#include <boost/date_time/posix_time/posix_time.hpp>
 #include <rfid/api.h>
 #include <rfid/reader.h>
 #include <iostream>
@@ -345,7 +346,7 @@ void transmit_worker(
         switch (gen2_logic_status){
             case START:
                 buff.insert(buff.end(), cw_ack.begin(), cw_ack.end());
-                for (int i = 0; i < 5; i++) {
+                for (int i = 0; i < 1; i++) {
                     size = tx_streamer->send(&buff.front(), buff.size(), metadata);
                     if (not tx_streamer->recv_async_msg(async_md)){
                         std::cout << boost::format("failed:\n    Async message recv timed out.\n") << std::endl;
@@ -493,6 +494,7 @@ void gate_impl(float (&ampl)[2]){
     int n_samples_T1 = T1_D * (s_rate / pow(10,6));
     int n_samples_PW = PW_D * (s_rate / pow(10,6));
     int n_samples_TAG_BIT = TAG_BIT_D * (s_rate / pow(10,6));
+    boost::posix_time::ptime timeLocal;
 
     if(gate_status == GATE_SEEK_EPC){
         state = 0;
@@ -534,7 +536,10 @@ void gate_impl(float (&ampl)[2]){
             }
             if(n_samples > n_samples_T1 && signal_state == POS_EDGE && num_pulses > NUM_PULSES_COMMAND){
                 if(state == 0){
-                    fprintf(fp, "%lld ", total + i * 5 + 2);
+                    fprintf(fp, "%lld ", total + i * 5);
+                    timeLocal = boost::posix_time::microsec_clock::local_time();
+                    string now = to_simple_string(timeLocal.time_of_day());
+                    fprintf(fp, "%s", now.c_str());
                 }
                 gate_status = GATE_OPEN;
                 after_gate.push_back(before_gate[i]); 
@@ -573,93 +578,93 @@ void gate_impl(float (&ampl)[2]){
     return;
 }
 
-int tag_sync(){
-    int max_index = 0;
-    float max = 0,corr;
-    gr_complex corr2;
-    int n_samples_TAG_BIT = TAG_BIT_D * (s_rate / pow(10,6));
-    int TAG_PREAMBLE[] = {1, 1, 0, 1, 0, 0, 1, 0, 0, 0, 1, 1};
-    // Do not have to check entire vector (not optimal)
-    for(int i=0; i < 1.5 * n_samples_TAG_BIT ; i++)
-    {
-        corr2 = gr_complex(0,0);
-        corr = 0;
-        // sync after matched filter (equivalent)
-        for (int j = 0; j < 2 * TAG_PREAMBLE_BITS; j ++)
-        {
-            corr2 = corr2 + after_gate[ (int) (i+j*n_samples_TAG_BIT/2) ] * gr_complex(TAG_PREAMBLE[j],0);
-        }
-        corr = std::norm(corr2);
-        if (corr > max)
-        {
-            max = corr;
-            max_index = i;
-        }
-    }  
+// int tag_sync(){
+//     int max_index = 0;
+//     float max = 0,corr;
+//     gr_complex corr2;
+//     int n_samples_TAG_BIT = TAG_BIT_D * (s_rate / pow(10,6));
+//     int TAG_PREAMBLE[] = {1, 1, 0, 1, 0, 0, 1, 0, 0, 0, 1, 1};
+//     // Do not have to check entire vector (not optimal)
+//     for(int i=0; i < 1.5 * n_samples_TAG_BIT ; i++)
+//     {
+//         corr2 = gr_complex(0,0);
+//         corr = 0;
+//         // sync after matched filter (equivalent)
+//         for (int j = 0; j < 2 * TAG_PREAMBLE_BITS; j ++)
+//         {
+//             corr2 = corr2 + after_gate[ (int) (i+j*n_samples_TAG_BIT/2) ] * gr_complex(TAG_PREAMBLE[j],0);
+//         }
+//         corr = std::norm(corr2);
+//         if (corr > max)
+//         {
+//             max = corr;
+//             max_index = i;
+//         }
+//     }  
 
-    // Preamble ({1,1,-1,1,-1,-1,1,-1,-1,-1,1,1} 1 2 4 7 11 12)) 
-    h_est = (after_gate[max_index] + after_gate[ (int) (max_index + n_samples_TAG_BIT/2) ] + after_gate[ (int) (max_index + 3*n_samples_TAG_BIT/2) ] + after_gate[ (int) (max_index + 6*n_samples_TAG_BIT/2)] + after_gate[(int) (max_index + 10*n_samples_TAG_BIT/2) ] + after_gate[ (int) (max_index + 11*n_samples_TAG_BIT/2)])/std::complex<float>(6,0);  
+//     // Preamble ({1,1,-1,1,-1,-1,1,-1,-1,-1,1,1} 1 2 4 7 11 12)) 
+//     h_est = (after_gate[max_index] + after_gate[ (int) (max_index + n_samples_TAG_BIT/2) ] + after_gate[ (int) (max_index + 3*n_samples_TAG_BIT/2) ] + after_gate[ (int) (max_index + 6*n_samples_TAG_BIT/2)] + after_gate[(int) (max_index + 10*n_samples_TAG_BIT/2) ] + after_gate[ (int) (max_index + 11*n_samples_TAG_BIT/2)])/std::complex<float>(6,0);  
 
-    // Shifted received waveform by n_samples_TAG_BIT/2
-    max_index = max_index + TAG_PREAMBLE_BITS * n_samples_TAG_BIT + n_samples_TAG_BIT/2; 
-    return max_index;  
-}
+//     // Shifted received waveform by n_samples_TAG_BIT/2
+//     max_index = max_index + TAG_PREAMBLE_BITS * n_samples_TAG_BIT + n_samples_TAG_BIT/2; 
+//     return max_index;  
+// }
 
-void tag_detection_RN16(int index)
-{
-    RN16_bits.resize(0);
-    vector<gr_complex> RN16_samples_complex;
-    int n_samples_TAG_BIT = TAG_BIT_D * (s_rate / pow(10,6));
-    int number_of_half_bits = 0;
-    for (float j = index; j < after_gate.size(); j += n_samples_TAG_BIT/2 )
-    {
-        number_of_half_bits++;
-        int k = round(j);
-        RN16_samples_complex.push_back(after_gate[k]);
+// void tag_detection_RN16(int index)
+// {
+//     RN16_bits.resize(0);
+//     vector<gr_complex> RN16_samples_complex;
+//     int n_samples_TAG_BIT = TAG_BIT_D * (s_rate / pow(10,6));
+//     int number_of_half_bits = 0;
+//     for (float j = index; j < after_gate.size(); j += n_samples_TAG_BIT/2 )
+//     {
+//         number_of_half_bits++;
+//         int k = round(j);
+//         RN16_samples_complex.push_back(after_gate[k]);
 
-        //out_2[written_sync] = in[j];
-        //written_sync ++;
+//         //out_2[written_sync] = in[j];
+//         //written_sync ++;
 
-        if (number_of_half_bits == 2*(RN16_BITS-1))
-        {
-            //out_2[written_sync] = h_est;
-             //written_sync ++;  
-            //produce(1,written_sync);        
-            break;
-        }
-    } 
-    // detection + differential decoder (since Tag uses FM0)
-    std::vector<float> tag_bits,dist;
-    float result;
-    int prev = 1,index_T=0;
+//         if (number_of_half_bits == 2*(RN16_BITS-1))
+//         {
+//             //out_2[written_sync] = h_est;
+//              //written_sync ++;  
+//             //produce(1,written_sync);        
+//             break;
+//         }
+//     } 
+//     // detection + differential decoder (since Tag uses FM0)
+//     std::vector<float> tag_bits,dist;
+//     float result;
+//     int prev = 1,index_T=0;
       
-    for (int j = 0; j < RN16_samples_complex.size()/2 ; j ++ )
-    {
-        result = std::real( (RN16_samples_complex[2*j] - RN16_samples_complex[2*j+1])*std::conj(h_est)); 
+//     for (int j = 0; j < RN16_samples_complex.size()/2 ; j ++ )
+//     {
+//         result = std::real( (RN16_samples_complex[2*j] - RN16_samples_complex[2*j+1])*std::conj(h_est)); 
   
-        if (result>0){
-            if (prev == 1)
-                RN16_bits.push_back(0);
-            else
-                RN16_bits.push_back(1);      
-            prev = 1;      
-            }
-        else
-        { 
-            if (prev == -1)
-                RN16_bits.push_back(0);
-            else
-                RN16_bits.push_back(1);      
-            prev = -1;    
-        }
-    }
-    // for(int i =0; i < RN16_bits.size(); i++){
-    //     fprintf(stderr, "%d ", RN16_bits[i]);
-    // }
-    // fprintf(stderr, "\n");
-    after_gate.resize(0);
-    //return tag_bits;
-}
+//         if (result>0){
+//             if (prev == 1)
+//                 RN16_bits.push_back(0);
+//             else
+//                 RN16_bits.push_back(1);      
+//             prev = 1;      
+//             }
+//         else
+//         { 
+//             if (prev == -1)
+//                 RN16_bits.push_back(0);
+//             else
+//                 RN16_bits.push_back(1);      
+//             prev = -1;    
+//         }
+//     }
+//     // for(int i =0; i < RN16_bits.size(); i++){
+//     //     fprintf(stderr, "%d ", RN16_bits[i]);
+//     // }
+//     // fprintf(stderr, "\n");
+//     after_gate.resize(0);
+//     //return tag_bits;
+// }
 
 int correlate(int n_samples_TAG_BIT, float ampl[2]){
     //fprintf(stderr, "hello9\n");
@@ -736,6 +741,10 @@ void rn16Decode(int rn16Index){
         else
             RN16_bits.push_back(1);
     }
+    // ofstream outfile;
+    // outfile.open("rn16.bin", std::ofstream::binary);
+    // outfile.write((const char*)&after_gate.front(), after_gate.size()*sizeof(complex<float>));
+    // outfile.close();
     after_gate.resize(0);
     // gettimeofday(&end, NULL);
     // unsigned long diff = 1000000 * (end.tv_sec - start.tv_sec) + end.tv_usec - start.tv_usec;
@@ -829,31 +838,31 @@ int check_crc(vector<char> &bits, int num_bits, int n_queries_sent){
     }
 }
 
-void voting(vector<string> vote_epc){
-    string finalBit = "";
-    string finalEPC = "";
-    for(int i = 0; i < 96; i++){
-        int count = 0;
-        for(int j = 0; j < vote_epc.size(); j++){
-            if(vote_epc[j][i] == '1'){
-                count += 1;
-            }
-        }
-        if(count >= 5){
-            finalBit += "1";
-        } else{
-            finalBit += "0";
-        }
-    }
-    //fprintf(stderr, "%s\n", finalBit.c_str());
-    for(int i = 0; i < 96; i += 4){
-        string tmp;
-        tmp = tmp.assign(finalBit, i, 4);
-        //fprintf(stderr, "%s\n", tmp.c_str());
-        finalEPC += mapping[tmp];
-    }
-    fprintf(stderr, "%s\n", finalEPC.c_str());
-}
+// void voting(vector<string> vote_epc){
+//     string finalBit = "";
+//     string finalEPC = "";
+//     for(int i = 0; i < 96; i++){
+//         int count = 0;
+//         for(int j = 0; j < vote_epc.size(); j++){
+//             if(vote_epc[j][i] == '1'){
+//                 count += 1;
+//             }
+//         }
+//         if(count >= 5){
+//             finalBit += "1";
+//         } else{
+//             finalBit += "0";
+//         }
+//     }
+//     //fprintf(stderr, "%s\n", finalBit.c_str());
+//     for(int i = 0; i < 96; i += 4){
+//         string tmp;
+//         tmp = tmp.assign(finalBit, i, 4);
+//         //fprintf(stderr, "%s\n", tmp.c_str());
+//         finalEPC += mapping[tmp];
+//     }
+//     fprintf(stderr, "%s\n", finalEPC.c_str());
+// }
 
 void recv_to_file(
     uhd::usrp::multi_usrp::sptr usrp,
@@ -876,7 +885,7 @@ void recv_to_file(
     // (use shared_ptr because ofstream is non-copyable)
     ofstream outfile, outfile2, outfile3;
     outfile.open(file, std::ofstream::binary);
-    //outfile2.open("filter_samples.bin", std::ofstream::binary);
+    //outfile2.open("filter.bin", std::ofstream::binary);
     //outfile3.open("gate_samples.bin", std::ofstream::binary);
     bool overflow_message = true;
     settling_time += usrp->get_time_now().get_real_secs();
@@ -901,8 +910,8 @@ void recv_to_file(
     int query_state[MAX_NUM_QUERIES];
     int n_queries_sent = 0;
     int trick = 0;
-    struct timeval start, end;
-    gettimeofday(&start, NULL);
+    //struct timeval start, end;
+    //gettimeofday(&start, NULL);
     int epc_count = 1;
     size_t num_rx_samps = 0;
     while(not stop_signal_called and (num_requested_samples == 0)){
@@ -941,6 +950,7 @@ void recv_to_file(
             continue;
         }
         filter(); // fir_filter_ccc
+        // outfile2.write((const char*)&before_gate.front(), before_gate.size()*sizeof(complex<float>));
         gate_impl(ampl);
         flag = 1;
         if(n_samples != n_samples_to_ungate){
@@ -1022,10 +1032,10 @@ void recv_to_file(
             } else{
                 // gettimeofday(&start, NULL);
                 string path = dir + "/" + to_string(count[3]+1) + ".bin";
-                ofstream outfile;
-                outfile.open(path, std::ofstream::binary);
-                outfile.write((const char*)&after_gate.front(), after_gate.size()*sizeof(complex<float>));
-                outfile.close();
+                ofstream tmpfile;
+                tmpfile.open(path, std::ofstream::binary);
+                tmpfile.write((const char*)&after_gate.front(), after_gate.size()*sizeof(complex<float>));
+                tmpfile.close();
                 // gettimeofday(&end, NULL);
                 // unsigned long diff = 1000000 * (end.tv_sec - start.tv_sec) + end.tv_usec - start.tv_usec;
                 // fprintf(stdout, "write = %lu\n", diff);
@@ -1052,9 +1062,9 @@ void recv_to_file(
             n_queries_sent += 1;
         }
     }
-    gettimeofday(&end, NULL);
-    float diff = 1000000 * (end.tv_sec - start.tv_sec) + end.tv_usec - start.tv_usec;
-    fprintf(stderr, "diff = %f\n", diff / 1e6);
+    // gettimeofday(&end, NULL);
+    // float diff = 1000000 * (end.tv_sec - start.tv_sec) + end.tv_usec - start.tv_usec;
+    // fprintf(stderr, "diff = %f\n", diff / 1e6);
 
     // Shut down receiver
     stream_cmd.stream_mode = uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS;
@@ -1107,7 +1117,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
     desc.add_options()
         ("help", "help message")
         ("tx-args", po::value<std::string>(&tx_args)->default_value("addr=192.168.91.6"), "uhd transmit device address args")
-        ("rx-args", po::value<std::string>(&rx_args)->default_value("addr=192.168.91.11"), "uhd receive device address args")
+        ("rx-args", po::value<std::string>(&rx_args)->default_value("addr=192.168.91.12"), "uhd receive device address args")
         ("file", po::value<std::string>(&file)->default_value("raw_samples.bin"), "name of the file to write binary samples to")
         //("type", po::value<std::string>(&type)->default_value("float"), "sample type in file: double, float, or short")
         ("nsamps", po::value<size_t>(&total_num_samps)->default_value(0), "total number of samples to receive")
@@ -1115,8 +1125,8 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
         ("spb", po::value<size_t>(&spb)->default_value(4000), "samples per buffer, 0 for default")
         ("tx-rate", po::value<double>(&tx_rate)->default_value(1e6), "rate of transmit outgoing samples")
         ("rx-rate", po::value<double>(&rx_rate)->default_value(2e6), "rate of receive incoming samples")
-        ("tx-freq", po::value<double>(&tx_freq)->default_value(910e6), "transmit RF center frequency in Hz")
-        ("rx-freq", po::value<double>(&rx_freq)->default_value(910e6), "receive RF center frequency in Hz")
+        ("tx-freq", po::value<double>(&tx_freq)->default_value(925e6), "transmit RF center frequency in Hz")
+        ("rx-freq", po::value<double>(&rx_freq)->default_value(925e6), "receive RF center frequency in Hz")
         ("tx-gain", po::value<double>(&tx_gain)->default_value(0), "gain for the transmit RF chain")
         ("rx-gain", po::value<double>(&rx_gain)->default_value(0), "gain for the receive RF chain")
         ("tx-ant", po::value<std::string>(&tx_ant)->default_value("TX/RX"), "transmit antenna selection")
